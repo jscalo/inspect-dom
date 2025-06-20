@@ -1,0 +1,884 @@
+#!/usr/bin/env node
+
+const CDP = require('chrome-remote-interface');
+const { execSync } = require('child_process');
+
+async function getFrontTabURL() {
+    const script = `const chrome = Application("Google Chrome");
+    chrome.windows[0].activeTab().url();`;
+    return execSync(`osascript -l JavaScript -e "${script.replace(/"/g, '\\"')}"`).toString().trim();
+}
+
+async function findCorrectTab(targetUrl, debug = false) {
+    // List all available tabs
+    const response = await fetch('http://localhost:9222/json');
+    const tabs = await response.json();
+    
+    if (debug) {
+        console.log('Available tabs:');
+        tabs.forEach((tab, i) => {
+            console.log(`  ${i}: ${tab.title} - ${tab.url}`);
+        });
+    }
+    
+    // Find tab that matches the URL from the front tab
+    const matchingTab = tabs.find(tab => tab.url === targetUrl && tab.type === 'page');
+    
+    if (!matchingTab) {
+        throw new Error(`Could not find tab with URL: ${targetUrl}`);
+    }
+    
+    if (debug) {
+        console.log(`Using tab: ${matchingTab.title} - ${matchingTab.url}`);
+    }
+    
+    return matchingTab;
+}
+
+function usage() {
+    console.log(`inspect-dom - Inspect DOM elements and their styles from Chrome
+
+USAGE:
+    inspect-dom <selector> [options]
+
+ARGUMENTS:
+    <selector>          CSS selector for the element to inspect (e.g., "#myId", ".myClass", "div.container")
+
+OPTIONS:
+    -r, --recursive     Include child elements (default: only show matching element)
+    --styles            Show declared CSS styles for each element
+    --computed-styles   Show computed CSS styles for each element
+    --no-defaults       Hide browser default/user-agent styles (only with --styles)
+    -h, --help          Show this help message
+
+DESCRIPTION:
+    Connects to Chrome's remote debugging interface to inspect DOM elements and their styles.
+    Chrome must be launched with remote debugging enabled:
+    
+    /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222
+
+    By default, the tool will inspect only the element matching the selector. Use -r to 
+    include child elements. When style options are provided, it will show the CSS styles 
+    for the selected element(s).
+
+EXAMPLES:
+    inspect-dom "#header"
+        Show only the element with id "header"
+        
+    inspect-dom ".sidebar" -r
+        Show element with class "sidebar" and all its children
+        
+    inspect-dom "div.main-content" --styles
+        Show element and its inline styles (no children)
+        
+    inspect-dom ".container" -r --computed-styles
+        Show element and all children with computed styles
+        
+    inspect-dom ".nav" -r --styles --computed-styles
+        Show element and children with both inline and computed styles
+        
+    inspect-dom ".container" --styles --no-defaults
+        Show element styles excluding browser defaults`);
+    process.exit(0);
+}
+
+const [, , selector, ...flags] = process.argv;
+
+// Check for help flags first
+if (flags.includes('-h') || flags.includes('--help') || selector === '-h' || selector === '--help') {
+    usage();
+}
+
+if (!selector) usage();
+
+const recursive = flags.includes('-r') || flags.includes('--recursive');
+const showDeclared = flags.includes('--styles');
+const showComputed = flags.includes('--computed-styles');
+const noDefaults = flags.includes('--no-defaults');
+const debug = flags.includes('--debug');
+
+// Calculate CSS specificity for sorting
+function calculateSpecificity(selectorText) {
+    // Simple specificity calculation: count IDs, classes, and elements
+    const ids = (selectorText.match(/#[a-zA-Z0-9_-]+/g) || []).length;
+    const classes = (selectorText.match(/\.[a-zA-Z0-9_-]+/g) || []).length;
+    const attributes = (selectorText.match(/\[[^\]]+\]/g) || []).length;
+    const pseudoClasses = (selectorText.match(/:[a-zA-Z-]+(?:\([^)]*\))?/g) || []).length;
+    const elements = (selectorText.match(/^[a-zA-Z][a-zA-Z0-9-]*|(?:^|\s)[a-zA-Z][a-zA-Z0-9-]*/g) || []).length;
+    
+    // Return specificity as [a, b, c] where a=IDs, b=classes+attributes+pseudo-classes, c=elements
+    return [ids, classes + attributes + pseudoClasses, elements];
+}
+
+// Compare specificity values
+function compareSpecificity(a, b) {
+    for (let i = 0; i < 3; i++) {
+        if (a[i] !== b[i]) {
+            return b[i] - a[i]; // Higher specificity first
+        }
+    }
+    return 0;
+}
+
+// Cache for stylesheet information to avoid repeated API calls
+const stylesheetCache = new Map();
+
+// Try to map a styleSheetId to an actual filename using heuristics
+async function tryMapStylesheetId(styleSheetId, client, debug = false) {
+    try {
+        // Check if we have cached stylesheet resources
+        const stylesheetResources = client._stylesheetResources;
+        if (!stylesheetResources || stylesheetResources.length === 0) {
+            return null;
+        }
+        
+        // Extract the last number from styleSheetId (e.g., "style-sheet-22624-29" -> 29)
+        const match = styleSheetId.match(/style-sheet-\d+-(\d+)$/);
+        if (!match) {
+            return null;
+        }
+        
+        const sheetIndex = parseInt(match[1]);
+        
+        // Filter to only local stylesheets (not external ones like Google Fonts)
+        const localStylesheets = stylesheetResources.filter(url => 
+            !url.includes('googleapis.com') && 
+            !url.includes('fonts.gstatic.com') &&
+            !url.includes('cdnjs.cloudflare.com') &&
+            !url.includes('unpkg.com')
+        );
+        
+        if (debug) {
+            console.log(`    Trying to map sheet index ${sheetIndex} to local stylesheets:`, localStylesheets);
+        }
+        
+        // Simple mapping: if we have local stylesheets, map by index
+        if (localStylesheets.length > 0) {
+            // For now, assume the first local stylesheet is likely the main one
+            // This is a heuristic that works for simple cases
+            const mappedUrl = localStylesheets[0];
+            
+            if (debug) {
+                console.log(`    Mapped styleSheetId ${styleSheetId} (index ${sheetIndex}) to: ${mappedUrl}`);
+            }
+            
+            return mappedUrl;
+        }
+        
+        return null;
+        
+    } catch (error) {
+        if (debug) {
+            console.log(`    Error mapping stylesheet ID: ${error.message}`);
+        }
+        return null;
+    }
+}
+
+// Collect all stylesheet information during initialization
+async function collectStylesheetInfo(CSS) {
+    try {
+        // Try to get all stylesheet headers using CSS.getAllStyleSheets if available
+        // This might provide the sourceURL information we need
+        
+        try {
+            // Note: CSS.getAllStyleSheets might not be available in all Chrome versions
+            // but it's worth trying as it could provide sourceURL information
+            const allStyleSheets = await CSS.getAllStyleSheets();
+            
+            if (debug) {
+                console.log(`Found ${allStyleSheets.headers ? allStyleSheets.headers.length : 0} stylesheet headers`);
+            }
+            
+            // Cache stylesheet headers if available
+            if (allStyleSheets.headers) {
+                for (const header of allStyleSheets.headers) {
+                    const info = {
+                        url: header.sourceURL || 'unknown',
+                        origin: header.origin || 'regular',
+                        title: header.title || '',
+                        disabled: header.disabled || false
+                    };
+                    
+                    stylesheetCache.set(header.styleSheetId, info);
+                    
+                    if (debug) {
+                        console.log(`    Cached stylesheet header ${header.styleSheetId}: ${info.url}`);
+                    }
+                }
+            }
+            
+        } catch (getAllError) {
+            if (debug) {
+                console.log(`CSS.getAllStyleSheets not available or failed: ${getAllError.message}`);
+            }
+            // This is expected in many Chrome versions - continue without it
+        }
+        
+        if (debug) {
+            console.log('Stylesheet collection initialized - will collect info on-demand');
+        }
+        
+    } catch (error) {
+        if (debug) {
+            console.log(`Warning: Could not initialize stylesheet collection: ${error.message}`);
+        }
+        // Continue without caching - we'll fall back to the old method
+    }
+}
+
+// Get stylesheet information with caching and improved source URL detection
+async function getStylesheetInfo(styleSheetId, CSS) {
+    if (!styleSheetId) {
+        return { url: 'inline', origin: 'inline' };
+    }
+    
+    // Check cache first
+    if (stylesheetCache.has(styleSheetId)) {
+        return stylesheetCache.get(styleSheetId);
+    }
+    
+    try {
+        // The key insight: CSS.getMatchedStylesForNode should have already provided
+        // the stylesheet headers with sourceURL information. However, we might need
+        // to access this differently. Let's try a direct approach to get stylesheet
+        // headers if the CDP supports it.
+        
+        let filename = 'unknown';
+        let origin = 'regular';
+        let sourceURL = null;
+        
+        // Try to get stylesheet text - this might give us more info in some cases
+        try {
+            const styleSheetInfo = await CSS.getStyleSheetText({ styleSheetId });
+            // Unfortunately, getStyleSheetText typically only returns the text content
+            // The sourceURL would come from the original getMatchedStylesForNode response
+        } catch (textError) {
+            if (debug) {
+                console.log(`Could not get stylesheet text for ${styleSheetId}: ${textError.message}`);
+            }
+        }
+        
+        // The styleSheetId often contains clues about the source
+        if (styleSheetId.includes('inspector')) {
+            filename = 'inspector-styles';
+            origin = 'inspector';
+        } else if (styleSheetId.includes('user-agent')) {
+            filename = 'user-agent-styles';
+            origin = 'user-agent';
+        } else {
+            // For regular stylesheets, we'll show a simplified ID
+            // The actual source URL should come from the matchedCSSRules response
+            filename = `stylesheet-${styleSheetId.split('-').pop()}`;
+            origin = 'regular';
+        }
+        
+        const info = { url: filename, origin, sourceURL };
+        stylesheetCache.set(styleSheetId, info);
+        return info;
+        
+    } catch (error) {
+        // Fallback: try to get some info from the stylesheet ID itself
+        let filename = 'unknown';
+        let origin = 'regular';
+        
+        if (styleSheetId.includes('inspector')) {
+            filename = 'inspector-styles';
+            origin = 'inspector';
+        } else if (styleSheetId.includes('user-agent')) {
+            filename = 'user-agent-styles';
+            origin = 'user-agent';
+        } else {
+            filename = `stylesheet-${styleSheetId.split('-').pop()}`;
+            origin = 'regular';
+        }
+        
+        const info = { url: filename, origin };
+        stylesheetCache.set(styleSheetId, info);
+        return info;
+    }
+}
+
+// Helper function to extract filename from URL
+function extractFilenameFromUrl(url) {
+    if (!url || url === 'unknown' || url === 'inline') {
+        return url;
+    }
+    
+    try {
+        // Handle data URLs
+        if (url.startsWith('data:')) {
+            return 'data-url-styles';
+        }
+        
+        // Handle blob URLs
+        if (url.startsWith('blob:')) {
+            return 'blob-styles';
+        }
+        
+        // Extract filename from regular URLs
+        const urlParts = url.split('/');
+        const filename = urlParts[urlParts.length - 1];
+        
+        // Remove query parameters and fragments
+        const cleanFilename = filename.split('?')[0].split('#')[0];
+        
+        // If no filename (ends with /), show domain
+        if (!cleanFilename) {
+            const urlObj = new URL(url);
+            return urlObj.hostname || 'external-styles';
+        }
+        
+        return cleanFilename || 'stylesheet';
+        
+    } catch (error) {
+        // If URL parsing fails, return the original or a fallback
+        return url.length > 50 ? 'external-styles' : url;
+    }
+}
+
+// Enhanced function to get readable stylesheet source name with line numbers
+async function getStylesheetDisplayName(rule, CSS) {
+    if (rule.origin === 'user-agent') {
+        return 'user-agent stylesheet';
+    } else if (rule.origin === 'inspector') {
+        return 'inspector stylesheet';
+    } else if (rule.origin === 'injected') {
+        return 'injected stylesheet';
+    } else if (!rule.styleSheetId) {
+        return 'inline styles';
+    } else {
+        try {
+            // Get the actual stylesheet information using the styleSheetId
+            // The rule should contain source range information
+            let displayName = '';
+            
+            // Try to get stylesheet headers to find the sourceURL
+            const styleInfo = await getStylesheetInfo(rule.styleSheetId, CSS);
+            
+            // Check if the rule has source range information (line numbers)
+            if (rule.style && rule.style.range) {
+                const lineNumber = rule.style.range.startLine + 1; // Convert from 0-based to 1-based
+                
+                // If we have a source URL, extract the filename
+                if (styleInfo.url && styleInfo.url !== 'unknown' && styleInfo.url !== 'inline') {
+                    const filename = extractFilenameFromUrl(styleInfo.url);
+                    displayName = `${filename}:${lineNumber}`;
+                } else {
+                    // Fallback with line number
+                    const id = rule.styleSheetId;
+                    if (id.includes('style-sheet')) {
+                        const match = id.match(/style-sheet-(\d+)-(\d+)/);
+                        if (match) {
+                            displayName = `stylesheet-${match[2]}:${lineNumber}`;
+                        } else {
+                            displayName = `stylesheet-${id.split('-').pop()}:${lineNumber}`;
+                        }
+                    } else {
+                        displayName = `stylesheet-${id.split('-').pop()}:${lineNumber}`;
+                    }
+                }
+            } else {
+                // No line number available, just show filename
+                if (styleInfo.url && styleInfo.url !== 'unknown' && styleInfo.url !== 'inline') {
+                    displayName = extractFilenameFromUrl(styleInfo.url);
+                } else {
+                    // Final fallback
+                    const id = rule.styleSheetId;
+                    if (id.includes('style-sheet')) {
+                        const match = id.match(/style-sheet-(\d+)-(\d+)/);
+                        if (match) {
+                            displayName = `stylesheet-${match[2]}`;
+                        } else {
+                            displayName = `stylesheet-${id.split('-').pop()}`;
+                        }
+                    } else {
+                        displayName = `stylesheet-${id.split('-').pop()}`;
+                    }
+                }
+            }
+            
+            return displayName;
+            
+        } catch (error) {
+            if (debug) {
+                console.log(`Error getting stylesheet display name: ${error.message}`);
+            }
+            // Ultimate fallback
+            const id = rule.styleSheetId;
+            return `stylesheet-${id.split('-').pop()}`;
+        }
+    }
+}
+
+// Helper function to deduplicate CSS properties and keep only winning values
+function deduplicateProperties(cssProperties) {
+    const propertyMap = new Map();
+    
+    // Process properties in order, later ones override earlier ones
+    for (const prop of cssProperties) {
+        if (prop.name && prop.value) {
+            propertyMap.set(prop.name, prop.value);
+        }
+    }
+    
+    return Array.from(propertyMap.entries()).map(([name, value]) => ({ name, value }));
+}
+
+// Helper function to deduplicate rules by selector text
+function deduplicateRules(rules) {
+    const ruleMap = new Map();
+    
+    for (const ruleMatch of rules) {
+        const selectorText = ruleMatch.rule.selectorList.text;
+        if (!ruleMap.has(selectorText)) {
+            ruleMap.set(selectorText, ruleMatch);
+        }
+    }
+    
+    return Array.from(ruleMap.values());
+}
+
+// Main function to display styled output like Chrome DevTools
+async function displayStyledOutput(styleInfo, CSS, debug) {
+    console.log("  Styles (Chrome DevTools format):");
+    
+    // 1. Show inline styles (highest priority)
+    if (styleInfo.inlineStyle && styleInfo.inlineStyle.cssText) {
+        console.log("\n    Inline Styles:");
+        console.log(`      style="${styleInfo.inlineStyle.cssText}"`);
+        const uniqueProps = deduplicateProperties(styleInfo.inlineStyle.cssProperties);
+        for (const prop of uniqueProps) {
+            console.log(`        ${prop.name}: ${prop.value}`);
+        }
+    }
+    
+    if (styleInfo.attributesStyle && styleInfo.attributesStyle.cssProperties.length > 0) {
+        console.log("\n    Attribute Styles:");
+        const uniqueProps = deduplicateProperties(styleInfo.attributesStyle.cssProperties);
+        for (const prop of uniqueProps) {
+            console.log(`        ${prop.name}: ${prop.value}`);
+        }
+    }
+    
+    // 2. Show stylesheet styles (sorted by specificity)
+    if (styleInfo.matchedCSSRules && styleInfo.matchedCSSRules.length > 0) {
+        console.log("\n    Stylesheet Styles:");
+        
+        // Filter out user-agent styles if --no-defaults is set
+        let rulesToShow = styleInfo.matchedCSSRules;
+        if (noDefaults) {
+            rulesToShow = styleInfo.matchedCSSRules.filter(ruleMatch => 
+                ruleMatch.rule.origin !== 'user-agent'
+            );
+        }
+        
+        // Deduplicate rules by selector
+        rulesToShow = deduplicateRules(rulesToShow);
+        
+        // Sort by specificity (highest first)
+        rulesToShow.sort((a, b) => {
+            const specA = calculateSpecificity(a.rule.selectorList.text);
+            const specB = calculateSpecificity(b.rule.selectorList.text);
+            return compareSpecificity(specA, specB);
+        });
+        
+        for (const ruleMatch of rulesToShow) {
+            const rule = ruleMatch.rule;
+            if (rule.selectorList && rule.style && rule.style.cssProperties.length > 0) {
+                const stylesheetName = await getStylesheetDisplayName(rule, CSS);
+                console.log(`      ${rule.selectorList.text} - ${stylesheetName}:`);
+                const uniqueProps = deduplicateProperties(rule.style.cssProperties);
+                for (const prop of uniqueProps) {
+                    console.log(`        ${prop.name}: ${prop.value}`);
+                }
+            }
+        }
+    }
+    
+    // 3. Show inherited styles
+    if (styleInfo.inherited && styleInfo.inherited.length > 0) {
+        console.log("\n    Inherited Styles:");
+        
+        // Track unique ancestor rules to avoid showing duplicates across levels
+        const seenRules = new Set();
+        
+        for (let i = 0; i < styleInfo.inherited.length; i++) {
+            const inheritedEntry = styleInfo.inherited[i];
+            const level = i + 1;
+            let hasAnyStyles = false;
+            
+            // Check if this level has any unique styles before showing the header
+            let uniqueInlineProps = [];
+            if (inheritedEntry.inlineStyle && inheritedEntry.inlineStyle.cssProperties.length > 0) {
+                uniqueInlineProps = deduplicateProperties(inheritedEntry.inlineStyle.cssProperties);
+                if (uniqueInlineProps.length > 0) {
+                    hasAnyStyles = true;
+                }
+            }
+            
+            let uniqueRules = [];
+            if (inheritedEntry.matchedCSSRules) {
+                let ancestorRules = inheritedEntry.matchedCSSRules;
+                if (noDefaults) {
+                    ancestorRules = ancestorRules.filter(ruleMatch => 
+                        ruleMatch.rule.origin !== 'user-agent'
+                    );
+                }
+                
+                // Filter out rules we've already seen
+                uniqueRules = ancestorRules.filter(ruleMatch => {
+                    const ruleKey = ruleMatch.rule.selectorList.text + '|' + 
+                                   ruleMatch.rule.style.cssProperties.map(p => `${p.name}:${p.value}`).join(';');
+                    if (seenRules.has(ruleKey)) {
+                        return false;
+                    }
+                    seenRules.add(ruleKey);
+                    return true;
+                });
+                
+                if (uniqueRules.length > 0) {
+                    hasAnyStyles = true;
+                }
+            }
+            
+            // Only show this level if it has unique styles
+            if (hasAnyStyles) {
+                console.log(`      From ancestor level ${level}:`);
+                
+                if (uniqueInlineProps.length > 0) {
+                    console.log(`        Inline styles:`);
+                    for (const prop of uniqueInlineProps) {
+                        console.log(`          ${prop.name}: ${prop.value}`);
+                    }
+                }
+                
+                for (const ruleMatch of uniqueRules) {
+                    const rule = ruleMatch.rule;
+                    if (rule.selectorList && rule.style && rule.style.cssProperties.length > 0) {
+                        console.log(`        ${rule.selectorList.text}:`);
+                        const uniqueProps = deduplicateProperties(rule.style.cssProperties);
+                        for (const prop of uniqueProps) {
+                            console.log(`          ${prop.name}: ${prop.value}`);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+(async function() {
+    try {
+        const url = await getFrontTabURL();
+        const correctTab = await findCorrectTab(url, debug);
+        
+        // Connect using the tab's webSocketDebuggerUrl
+        const client = await CDP({
+            target: correctTab.webSocketDebuggerUrl
+        });
+        const { DOM, CSS, Runtime, Page } = client;
+
+        if (debug) console.log(`Connecting to URL: ${url}`);
+        
+        await Page.enable();
+        await Runtime.enable();
+        await DOM.enable();
+        if (showDeclared || showComputed) {
+            await CSS.enable();
+            // Collect stylesheet information for better filename display
+            await collectStylesheetInfo(CSS);
+            
+            // Try to get page resources to map stylesheet IDs to actual filenames
+            try {
+                const { frameTree } = await Page.getFrameTree();
+                if (debug) {
+                    console.log('Got page frame tree for resource mapping');
+                }
+                
+                // Try to get resources for the main frame
+                const resources = await Page.getResourceTree();
+                if (resources && resources.frameTree && resources.frameTree.resources) {
+                    if (debug) {
+                        console.log(`Found ${resources.frameTree.resources.length} page resources`);
+                        for (const resource of resources.frameTree.resources) {
+                            if (resource.type === 'Stylesheet') {
+                                console.log(`  Stylesheet resource: ${resource.url}`);
+                            }
+                        }
+                    }
+                    
+                    // Cache stylesheet resources by URL for later lookup
+                    const stylesheetResources = [];
+                    for (const resource of resources.frameTree.resources) {
+                        if (resource.type === 'Stylesheet') {
+                            stylesheetResources.push(resource.url);
+                        }
+                    }
+                    
+                    // Store the stylesheet resources for later use
+                    // We'll try to match them to styleSheetIds using heuristics
+                    if (stylesheetResources.length > 0) {
+                        client._stylesheetResources = stylesheetResources;
+                        if (debug) {
+                            console.log(`Cached ${stylesheetResources.length} stylesheet resources for matching`);
+                        }
+                    }
+                }
+            } catch (resourceError) {
+                if (debug) {
+                    console.log(`Could not get page resources: ${resourceError.message}`);
+                }
+            }
+        }
+        
+        // Make sure DOM is fully loaded and get the document
+        const { root } = await DOM.getDocument({ depth: -1 });
+
+        // No need to navigate since we're already on the front tab
+        
+        // Test if we can access the document
+        if (debug) {
+            const { result: testResult } = await Runtime.evaluate({
+                expression: `document.title`,
+                returnByValue: true
+            });
+            console.log(`Page title: ${testResult.value}`);
+            console.log(`Looking for selector: ${selector}`);
+        }
+
+    // Evaluate selector and collect elements based on recursive flag
+    const { result } = await Runtime.evaluate({
+        expression: `
+      (function() {
+        const root = document.querySelector('${selector}');
+        if (!root) return null;
+        
+        const recursive = ${recursive};
+        
+        function walk(node, depth = 0) {
+          const nodeInfo = {
+            tag: node.tagName,
+            id: node.id,
+            class: node.className
+          };
+          
+          if (recursive && node.children.length > 0) {
+            nodeInfo.children = Array.from(node.children).map(child => walk(child, depth + 1));
+          }
+          
+          return nodeInfo;
+        }
+        
+        const tree = walk(root);
+        return JSON.stringify({ tree });
+      })()
+    `,
+        returnByValue: true
+    });
+
+    if (!result.value) {
+        console.error(`Element not found: ${selector}`);
+        process.exit(1);
+    }
+
+    const { tree } = JSON.parse(result.value);
+    
+    // Display the DOM tree structure
+    function displayTree(node, depth = 0) {
+        const indent = "  ".repeat(depth);
+        const elementDesc = `${node.tag}${node.id ? "#" + node.id : ""}${node.class ? "." + node.class.split(" ").join(".") : ""}`;
+        console.log(`${indent}${elementDesc}`);
+        
+        if (node.children && node.children.length > 0) {
+            node.children.forEach(child => displayTree(child, depth + 1));
+        }
+    }
+    
+    console.log("DOM Structure:");
+    displayTree(tree);
+
+    if (showDeclared || showComputed) {
+        console.log("\n--- Style Information ---\n");
+        
+        // Get all DOM elements we need to process
+        const { result: elementsResult } = await Runtime.evaluate({
+            expression: `
+                (function() {
+                    const root = document.querySelector('${selector}');
+                    if (!root) return null;
+                    
+                    const recursive = ${recursive};
+                    const results = [];
+                    
+                    function processElement(node, depth = 0) {
+                        results.push({
+                            tag: node.tagName,
+                            id: node.id,
+                            class: node.className, 
+                            depth: depth
+                        });
+                        
+                        // Process children only if recursive flag is set
+                        if (recursive) {
+                            Array.from(node.children).forEach(child => processElement(child, depth + 1));
+                        }
+                    }
+                    
+                    processElement(root);
+                    return results;
+                })()
+            `,
+            returnByValue: true
+        });
+
+        if (!elementsResult.value) {
+            console.log("No style information available");
+            return;
+        }
+
+        // Try using DOM.querySelector directly instead of Runtime.evaluate
+        try {
+            const { nodeId } = await DOM.querySelector({
+                nodeId: root.nodeId,
+                selector: selector
+            });
+            
+            if (debug) {
+                console.log(`    Found element with DOM node ID: ${nodeId}`);
+            }
+            
+            const elementInfo = elementsResult.value[0];
+            const elementDesc = `${elementInfo.tag}${elementInfo.id ? "#" + elementInfo.id : ""}${elementInfo.class ? "." + elementInfo.class.split(" ").join(".") : ""}`;
+            
+            console.log(`\n${elementDesc}:`);
+
+            if (showDeclared) {
+                try {
+                    if (debug) {
+                        console.log(`    Getting complete style information for DOM node ID: ${nodeId}`);
+                    }
+                    
+                    // Get comprehensive style information
+                    const styleInfo = await CSS.getMatchedStylesForNode({ nodeId: nodeId });
+                    
+                    // Cache stylesheet source information from the response
+                    if (styleInfo.matchedCSSRules) {
+                        for (const ruleMatch of styleInfo.matchedCSSRules) {
+                            const rule = ruleMatch.rule;
+                            if (rule.styleSheetId && rule.sourceURL) {
+                                // Cache the actual source URL from the response
+                                const info = {
+                                    url: rule.sourceURL,
+                                    origin: rule.origin || 'regular'
+                                };
+                                stylesheetCache.set(rule.styleSheetId, info);
+                                
+                                if (debug) {
+                                    console.log(`    Cached stylesheet ${rule.styleSheetId}: ${rule.sourceURL}`);
+                                }
+                            } else if (rule.styleSheetId && !stylesheetCache.has(rule.styleSheetId)) {
+                                // Try to map using heuristics and available resources
+                                const mappedUrl = await tryMapStylesheetId(rule.styleSheetId, client, debug);
+                                if (mappedUrl) {
+                                    const info = {
+                                        url: mappedUrl,
+                                        origin: rule.origin || 'regular'
+                                    };
+                                    stylesheetCache.set(rule.styleSheetId, info);
+                                    
+                                    if (debug) {
+                                        console.log(`    Mapped stylesheet ${rule.styleSheetId} to: ${mappedUrl}`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (debug) {
+                        console.log(`    Got ${styleInfo.matchedCSSRules ? styleInfo.matchedCSSRules.length : 0} CSS rules`);
+                        console.log(`    Inline style: ${styleInfo.inlineStyle ? 'present' : 'none'}`);
+                        console.log(`    Inherited styles: ${styleInfo.inherited ? styleInfo.inherited.length : 0} levels`);
+                        
+                        // Debug all rules to see what information we have
+                        if (styleInfo.matchedCSSRules && styleInfo.matchedCSSRules.length > 0) {
+                            console.log(`    Rule debug details:`);
+                            for (let i = 0; i < Math.min(styleInfo.matchedCSSRules.length, 3); i++) {
+                                const rule = styleInfo.matchedCSSRules[i].rule;
+                                console.log(`      Rule ${i}:`, {
+                                    styleSheetId: rule.styleSheetId,
+                                    sourceURL: rule.sourceURL,
+                                    origin: rule.origin,
+                                    hasRange: rule.style && rule.style.range ? 'yes' : 'no',
+                                    startLine: rule.style && rule.style.range ? rule.style.range.startLine : 'none',
+                                    selector: rule.selectorList ? rule.selectorList.text : 'none'
+                                });
+                            }
+                        }
+                    }
+                    
+                    await displayStyledOutput(styleInfo, CSS, debug);
+                    
+                } catch (error) {
+                    if (debug) {
+                        console.log(`    CSS Error details: ${error.message}`);
+                    }
+                    console.log("  Error getting declared styles");
+                }
+            }
+
+            if (showComputed) {
+                try {
+                    const { computedStyle } = await CSS.getComputedStyleForNode({ nodeId: nodeId });
+                    const relevantStyles = {};
+                    
+                    // Filter to show only meaningful computed styles
+                    const importantProps = [
+                        'display', 'position', 'width', 'height', 'margin', 'padding', 
+                        'border', 'background', 'background-color', 'color', 'font-size', 'font-family',
+                        'z-index', 'opacity', 'visibility', 'overflow', 'float', 'clear', 'top', 'left', 'right', 'bottom'
+                    ];
+                    
+                    for (const prop of computedStyle) {
+                        if (importantProps.includes(prop.name) && 
+                            prop.value && 
+                            prop.value !== 'auto' && 
+                            prop.value !== 'normal' && 
+                            prop.value !== 'initial' &&
+                            prop.value !== 'rgba(0, 0, 0, 0)' &&
+                            prop.value !== '0px') {
+                            relevantStyles[prop.name] = prop.value;
+                        }
+                    }
+                    
+                    if (Object.keys(relevantStyles).length > 0) {
+                        console.log("  Key computed styles:");
+                        for (const [prop, value] of Object.entries(relevantStyles)) {
+                            console.log(`    ${prop}: ${value}`);
+                        }
+                    } else {
+                        console.log("  No significant computed styles");
+                    }
+                } catch (error) {
+                    if (debug) {
+                        console.log(`    Computed styles error: ${error.message}`);
+                    }
+                    console.log("  Error getting computed styles");
+                }
+            }
+        } catch (error) {
+            if (debug) {
+                console.log(`    DOM querySelector error: ${error.message}`);
+            }
+            console.log("  Error finding element in DOM");
+        }
+    }
+
+        client.close();
+    } catch (error) {
+        console.error('Error connecting to Chrome:', error.message);
+        console.error('\nMake sure Chrome is running with remote debugging enabled:');
+        console.error('/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222');
+        process.exit(1);
+    }
+})();
