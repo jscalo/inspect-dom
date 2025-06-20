@@ -36,6 +36,7 @@ inspect-dom <selector> [options]
 - `--styles` - Show declared CSS styles for each element
 - `--computed-styles` - Show computed CSS styles for each element
 - `--no-defaults` - Hide browser default/user-agent styles (only with --styles)
+- `--debug` - Show verbose debugging information (for troubleshooting only)
 - `-h, --help` - Show help message
 
 ## Examples
@@ -75,6 +76,12 @@ Show element and children with both declared and computed styles
 inspect-dom ".container" --styles --no-defaults
 ```
 Show element styles excluding browser defaults
+
+### Debug mode
+```bash
+inspect-dom ".container" --styles --debug
+```
+Show element with verbose debugging information (for troubleshooting connection issues)
 
 ## Features
 

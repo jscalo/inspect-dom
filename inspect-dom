@@ -49,6 +49,7 @@ OPTIONS:
     --styles            Show declared CSS styles for each element
     --computed-styles   Show computed CSS styles for each element
     --no-defaults       Hide browser default/user-agent styles (only with --styles)
+    --debug             Show verbose debugging information (for troubleshooting only)
     -h, --help          Show this help message
 
 DESCRIPTION:
