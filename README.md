@@ -36,7 +36,7 @@ inspect-dom <selector> [options]
 - `-r, --recursive` - Include child elements (default: only show matching element)
 - `--styles` - Show declared CSS styles for each element
 - `--computed-styles` - Show computed CSS styles for each element
-- `--no-defaults` - Hide browser default/user-agent styles (only with --styles)
+- `--no-defaults` - Hide browser default/user-agent styles and properties with default values (only with --styles)
 - `--debug` - Show verbose debugging information (for troubleshooting only)
 - `-h, --help` - Show help message
 

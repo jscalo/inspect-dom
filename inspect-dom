@@ -48,7 +48,7 @@ OPTIONS:
     -r, --recursive     Include child elements (default: only show matching element)
     --styles            Show declared CSS styles for each element
     --computed-styles   Show computed CSS styles for each element
-    --no-defaults       Hide browser default/user-agent styles (only with --styles)
+    --no-defaults       Hide browser default/user-agent styles and properties with default values (only with --styles)
     --debug             Show verbose debugging information (for troubleshooting only)
     -h, --help          Show this help message
 
@@ -125,6 +125,28 @@ function compareSpecificity(a, b) {
         }
     }
     return 0;
+}
+
+// Filter out CSS properties that are implicit (browser-computed) when --no-defaults is used
+function filterImplicitProperties(properties, debug = false) {
+    return properties.filter(prop => {
+        if (debug) {
+            console.log(`        DEBUG: ${prop.name}: ${prop.value} (implicit: ${prop.implicit})`);
+        }
+        
+        // If implicit flag is unavailable, fall back to value-based filtering for common defaults
+        if (prop.implicit === undefined) {
+            const defaultValues = ['initial', 'unset'];
+            const isDefaultValue = defaultValues.includes(prop.value.toLowerCase().trim());
+            if (debug && isDefaultValue) {
+                console.log(`        DEBUG: Filtering ${prop.name} due to default value (implicit flag unavailable)`);
+            }
+            return !isDefaultValue;
+        }
+        
+        // Keep properties that are explicitly declared (not implicit browser defaults)
+        return prop.implicit !== true;
+    });
 }
 
 // Cache for stylesheet information to avoid repeated API calls
@@ -454,7 +476,10 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
     if (styleInfo.inlineStyle && styleInfo.inlineStyle.cssText) {
         console.log(`${baseIndent}    Inline Styles:`);
         console.log(`${baseIndent}      style="${styleInfo.inlineStyle.cssText}"`);
-        const uniqueProps = deduplicateProperties(styleInfo.inlineStyle.cssProperties);
+        let uniqueProps = deduplicateProperties(styleInfo.inlineStyle.cssProperties);
+        if (noDefaults) {
+            uniqueProps = filterImplicitProperties(uniqueProps, debug);
+        }
         for (const prop of uniqueProps) {
             console.log(`${baseIndent}        ${prop.name}: ${prop.value}`);
         }
@@ -462,7 +487,10 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
     
     if (styleInfo.attributesStyle && styleInfo.attributesStyle.cssProperties.length > 0) {
         console.log(`${baseIndent}    Attribute Styles:`);
-        const uniqueProps = deduplicateProperties(styleInfo.attributesStyle.cssProperties);
+        let uniqueProps = deduplicateProperties(styleInfo.attributesStyle.cssProperties);
+        if (noDefaults) {
+            uniqueProps = filterImplicitProperties(uniqueProps, debug);
+        }
         for (const prop of uniqueProps) {
             console.log(`${baseIndent}        ${prop.name}: ${prop.value}`);
         }
@@ -495,7 +523,10 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
             if (rule.selectorList && rule.style && rule.style.cssProperties.length > 0) {
                 const stylesheetName = await getStylesheetDisplayName(rule, CSS);
                 console.log(`${baseIndent}      ${rule.selectorList.text} - ${stylesheetName}:`);
-                const uniqueProps = deduplicateProperties(rule.style.cssProperties);
+                let uniqueProps = deduplicateProperties(rule.style.cssProperties);
+                if (noDefaults) {
+                    uniqueProps = filterImplicitProperties(uniqueProps, debug);
+                }
                 for (const prop of uniqueProps) {
                     console.log(`${baseIndent}        ${prop.name}: ${prop.value}`);
                 }
@@ -555,7 +586,11 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                 
                 if (uniqueInlineProps.length > 0) {
                     console.log(`${baseIndent}        Inline styles:`);
-                    for (const prop of uniqueInlineProps) {
+                    let propsToShow = uniqueInlineProps;
+                    if (noDefaults) {
+                        propsToShow = filterImplicitProperties(uniqueInlineProps, debug);
+                    }
+                    for (const prop of propsToShow) {
                         console.log(`${baseIndent}          ${prop.name}: ${prop.value}`);
                     }
                 }
@@ -564,7 +599,10 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                     const rule = ruleMatch.rule;
                     if (rule.selectorList && rule.style && rule.style.cssProperties.length > 0) {
                         console.log(`${baseIndent}        ${rule.selectorList.text}:`);
-                        const uniqueProps = deduplicateProperties(rule.style.cssProperties);
+                        let uniqueProps = deduplicateProperties(rule.style.cssProperties);
+                        if (noDefaults) {
+                            uniqueProps = filterImplicitProperties(uniqueProps, debug);
+                        }
                         for (const prop of uniqueProps) {
                             console.log(`${baseIndent}          ${prop.name}: ${prop.value}`);
                         }
