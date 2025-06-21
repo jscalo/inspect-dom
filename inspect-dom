@@ -447,30 +447,30 @@ function deduplicateRules(rules) {
 }
 
 // Main function to display styled output like Chrome DevTools
-async function displayStyledOutput(styleInfo, CSS, debug) {
-    console.log("  Styles:");
+async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
+    console.log(`${baseIndent}  Styles:`);
     
     // 1. Show inline styles (highest priority)
     if (styleInfo.inlineStyle && styleInfo.inlineStyle.cssText) {
-        console.log("\n    Inline Styles:");
-        console.log(`      style="${styleInfo.inlineStyle.cssText}"`);
+        console.log(`${baseIndent}    Inline Styles:`);
+        console.log(`${baseIndent}      style="${styleInfo.inlineStyle.cssText}"`);
         const uniqueProps = deduplicateProperties(styleInfo.inlineStyle.cssProperties);
         for (const prop of uniqueProps) {
-            console.log(`        ${prop.name}: ${prop.value}`);
+            console.log(`${baseIndent}        ${prop.name}: ${prop.value}`);
         }
     }
     
     if (styleInfo.attributesStyle && styleInfo.attributesStyle.cssProperties.length > 0) {
-        console.log("\n    Attribute Styles:");
+        console.log(`${baseIndent}    Attribute Styles:`);
         const uniqueProps = deduplicateProperties(styleInfo.attributesStyle.cssProperties);
         for (const prop of uniqueProps) {
-            console.log(`        ${prop.name}: ${prop.value}`);
+            console.log(`${baseIndent}        ${prop.name}: ${prop.value}`);
         }
     }
     
     // 2. Show stylesheet styles (sorted by specificity)
     if (styleInfo.matchedCSSRules && styleInfo.matchedCSSRules.length > 0) {
-        console.log("\n    Stylesheet Styles:");
+        console.log(`${baseIndent}    Stylesheet Styles:`);
         
         // Filter out user-agent styles if --no-defaults is set
         let rulesToShow = styleInfo.matchedCSSRules;
@@ -494,10 +494,10 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
             const rule = ruleMatch.rule;
             if (rule.selectorList && rule.style && rule.style.cssProperties.length > 0) {
                 const stylesheetName = await getStylesheetDisplayName(rule, CSS);
-                console.log(`      ${rule.selectorList.text} - ${stylesheetName}:`);
+                console.log(`${baseIndent}      ${rule.selectorList.text} - ${stylesheetName}:`);
                 const uniqueProps = deduplicateProperties(rule.style.cssProperties);
                 for (const prop of uniqueProps) {
-                    console.log(`        ${prop.name}: ${prop.value}`);
+                    console.log(`${baseIndent}        ${prop.name}: ${prop.value}`);
                 }
             }
         }
@@ -505,7 +505,7 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
     
     // 3. Show inherited styles
     if (styleInfo.inherited && styleInfo.inherited.length > 0) {
-        console.log("\n    Inherited Styles:");
+        console.log(`${baseIndent}    Inherited Styles:`);
         
         // Track unique ancestor rules to avoid showing duplicates across levels
         const seenRules = new Set();
@@ -551,22 +551,22 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
             
             // Only show this level if it has unique styles
             if (hasAnyStyles) {
-                console.log(`      From ancestor level ${level}:`);
+                console.log(`${baseIndent}      From ancestor level ${level}:`);
                 
                 if (uniqueInlineProps.length > 0) {
-                    console.log(`        Inline styles:`);
+                    console.log(`${baseIndent}        Inline styles:`);
                     for (const prop of uniqueInlineProps) {
-                        console.log(`          ${prop.name}: ${prop.value}`);
+                        console.log(`${baseIndent}          ${prop.name}: ${prop.value}`);
                     }
                 }
                 
                 for (const ruleMatch of uniqueRules) {
                     const rule = ruleMatch.rule;
                     if (rule.selectorList && rule.style && rule.style.cssProperties.length > 0) {
-                        console.log(`        ${rule.selectorList.text}:`);
+                        console.log(`${baseIndent}        ${rule.selectorList.text}:`);
                         const uniqueProps = deduplicateProperties(rule.style.cssProperties);
                         for (const prop of uniqueProps) {
-                            console.log(`          ${prop.name}: ${prop.value}`);
+                            console.log(`${baseIndent}          ${prop.name}: ${prop.value}`);
                         }
                     }
                 }
@@ -760,17 +760,50 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
                     const recursive = ${recursive};
                     const results = [];
                     
-                    function processElement(node, depth = 0) {
+                    function processElement(node, depth = 0, path = []) {
+                        // Generate a unique selector for this element
+                        let elementSelector = node.tagName.toLowerCase();
+                        if (node.id) {
+                            elementSelector = '#' + node.id;
+                        } else if (node.className) {
+                            const classes = node.className.trim().split(/\s+/).join('.');
+                            elementSelector = node.tagName.toLowerCase() + '.' + classes;
+                        } else {
+                            // Use nth-child selector for elements without id/class
+                            const parent = node.parentElement;
+                            if (parent) {
+                                const siblings = Array.from(parent.children).filter(child => 
+                                    child.tagName === node.tagName
+                                );
+                                const index = siblings.indexOf(node) + 1;
+                                elementSelector = node.tagName.toLowerCase() + ':nth-of-type(' + index + ')';
+                            }
+                        }
+                        
+                        // Collect attributes for HTML-like display
+                        const attributes = {};
+                        for (let i = 0; i < node.attributes.length; i++) {
+                            const attr = node.attributes[i];
+                            if (['src', 'alt', 'href', 'title', 'type', 'value', 'placeholder'].includes(attr.name) || 
+                                attr.name.startsWith('data-')) {
+                                attributes[attr.name] = attr.value;
+                            }
+                        }
+                        
                         results.push({
                             tag: node.tagName,
                             id: node.id,
                             class: node.className, 
-                            depth: depth
+                            depth: depth,
+                            selector: elementSelector,
+                            attributes: attributes
                         });
                         
                         // Process children only if recursive flag is set
                         if (recursive) {
-                            Array.from(node.children).forEach(child => processElement(child, depth + 1));
+                            Array.from(node.children).forEach((child, index) => 
+                                processElement(child, depth + 1, [...path, index])
+                            );
                         }
                     }
                     
@@ -786,24 +819,70 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
             return;
         }
 
-        // Try using DOM.querySelector directly instead of Runtime.evaluate
-        try {
-            const { nodeId } = await DOM.querySelector({
-                nodeId: root.nodeId,
-                selector: selector
-            });
-            
-            if (debug) {
-                console.log(`    Found element with DOM node ID: ${nodeId}`);
-            }
-            
-            const elementInfo = elementsResult.value[0];
-            const elementDesc = `${elementInfo.tag}${elementInfo.id ? "#" + elementInfo.id : ""}${elementInfo.class ? "." + elementInfo.class.split(" ").join(".") : ""}`;
-            
-            console.log(`\n${elementDesc}:`);
-
-            if (showDeclared) {
+        // Process style information for all elements (recursive if enabled)
+        const elementsToProcess = recursive ? elementsResult.value : [elementsResult.value[0]];
+        
+        for (const elementInfo of elementsToProcess) {
+            try {
+                // Find the DOM node for this element using its selector
+                let nodeId;
                 try {
+                    if (elementInfo.id) {
+                        // Use ID selector for elements with IDs
+                        const result = await DOM.querySelector({
+                            nodeId: root.nodeId,
+                            selector: `#${elementInfo.id}`
+                        });
+                        nodeId = result.nodeId;
+                    } else if (elementInfo.selector) {
+                        // Use the generated selector
+                        const result = await DOM.querySelector({
+                            nodeId: root.nodeId,
+                            selector: elementInfo.selector
+                        });
+                        nodeId = result.nodeId;
+                    } else {
+                        // Fallback to original selector for root element
+                        const result = await DOM.querySelector({
+                            nodeId: root.nodeId,
+                            selector: selector
+                        });
+                        nodeId = result.nodeId;
+                    }
+                } catch (selectorError) {
+                    if (debug) {
+                        console.log(`    Could not find element with selector "${elementInfo.selector}": ${selectorError.message}`);
+                    }
+                    continue; // Skip this element if we can't find it
+                }
+                
+                if (debug) {
+                    console.log(`    Found element with DOM node ID: ${nodeId} (selector: ${elementInfo.selector})`);
+                }
+                
+                // Create HTML-like element description for display
+                const tag = elementInfo.tag.toLowerCase();
+                let attrs = "";
+                if (elementInfo.id) {
+                    attrs += ` id="${elementInfo.id}"`;
+                }
+                if (elementInfo.class && elementInfo.class.trim()) {
+                    attrs += ` class="${elementInfo.class.trim()}"`;
+                }
+                if (elementInfo.attributes) {
+                    for (const [attrName, attrValue] of Object.entries(elementInfo.attributes)) {
+                        if (attrName !== 'id' && attrName !== 'class') {
+                            const displayValue = attrValue.length > 30 ? attrValue.substring(0, 30) + "..." : attrValue;
+                            attrs += ` ${attrName}="${displayValue}"`;
+                        }
+                    }
+                }
+                
+                const indent = "  ".repeat(elementInfo.depth || 0);
+                console.log(`\n${indent}<${tag}${attrs}>:`);
+
+                if (showDeclared) {
+                    try {
                     if (debug) {
                         console.log(`    Getting complete style information for DOM node ID: ${nodeId}`);
                     }
@@ -866,7 +945,7 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
                         }
                     }
                     
-                    await displayStyledOutput(styleInfo, CSS, debug);
+                    await displayStyledOutput(styleInfo, CSS, debug, indent);
                     
                 } catch (error) {
                     if (debug) {
@@ -901,25 +980,26 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
                     }
                     
                     if (Object.keys(relevantStyles).length > 0) {
-                        console.log("  Key computed styles:");
+                        console.log(`${indent}  Key computed styles:`);
                         for (const [prop, value] of Object.entries(relevantStyles)) {
-                            console.log(`    ${prop}: ${value}`);
+                            console.log(`${indent}    ${prop}: ${value}`);
                         }
                     } else {
-                        console.log("  No significant computed styles");
+                        console.log(`${indent}  No significant computed styles`);
                     }
                 } catch (error) {
                     if (debug) {
                         console.log(`    Computed styles error: ${error.message}`);
                     }
-                    console.log("  Error getting computed styles");
+                    console.log(`${indent}  Error getting computed styles`);
                 }
             }
-        } catch (error) {
-            if (debug) {
-                console.log(`    DOM querySelector error: ${error.message}`);
+            } catch (error) {
+                if (debug) {
+                    console.log(`    DOM querySelector error for element: ${error.message}`);
+                }
+                console.log(`  Error finding element in DOM: ${elementInfo.selector || elementInfo.tag}`);
             }
-            console.log("  Error finding element in DOM");
         }
     }
 
