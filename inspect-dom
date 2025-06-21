@@ -448,7 +448,7 @@ function deduplicateRules(rules) {
 
 // Main function to display styled output like Chrome DevTools
 async function displayStyledOutput(styleInfo, CSS, debug) {
-    console.log("  Styles (Chrome DevTools format):");
+    console.log("  Styles:");
     
     // 1. Show inline styles (highest priority)
     if (styleInfo.inlineStyle && styleInfo.inlineStyle.cssText) {
@@ -667,8 +667,20 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
           const nodeInfo = {
             tag: node.tagName,
             id: node.id,
-            class: node.className
+            class: node.className,
+            attributes: {}
           };
+          
+          // Collect relevant attributes
+          const relevantAttrs = ['src', 'alt', 'href', 'title', 'type', 'value', 'placeholder', 'data-*'];
+          for (let i = 0; i < node.attributes.length; i++) {
+            const attr = node.attributes[i];
+            // Include common attributes or data attributes
+            if (['src', 'alt', 'href', 'title', 'type', 'value', 'placeholder'].includes(attr.name) || 
+                attr.name.startsWith('data-')) {
+              nodeInfo.attributes[attr.name] = attr.value;
+            }
+          }
           
           if (recursive && node.children.length > 0) {
             nodeInfo.children = Array.from(node.children).map(child => walk(child, depth + 1));
@@ -691,18 +703,48 @@ async function displayStyledOutput(styleInfo, CSS, debug) {
 
     const { tree } = JSON.parse(result.value);
     
-    // Display the DOM tree structure
+    // Display the DOM tree structure in HTML-like format
     function displayTree(node, depth = 0) {
         const indent = "  ".repeat(depth);
-        const elementDesc = `${node.tag}${node.id ? "#" + node.id : ""}${node.class ? "." + node.class.split(" ").join(".") : ""}`;
-        console.log(`${indent}${elementDesc}`);
+        const tag = node.tag.toLowerCase();
         
+        // Build attributes string for HTML-like display
+        let attrs = "";
+        if (node.id) {
+            attrs += ` id="${node.id}"`;
+        }
+        if (node.class && node.class.trim()) {
+            attrs += ` class="${node.class.trim()}"`;
+        }
+        
+        // Add other relevant attributes
+        if (node.attributes) {
+            for (const [attrName, attrValue] of Object.entries(node.attributes)) {
+                if (attrName !== 'id' && attrName !== 'class') {
+                    // Truncate very long attribute values for readability
+                    const displayValue = attrValue.length > 50 ? attrValue.substring(0, 50) + "..." : attrValue;
+                    attrs += ` ${attrName}="${displayValue}"`;
+                }
+            }
+        }
+        
+        // Display in HTML-like format
         if (node.children && node.children.length > 0) {
+            console.log(`${indent}<${tag}${attrs}>`);
             node.children.forEach(child => displayTree(child, depth + 1));
+            console.log(`${indent}</${tag}>`);
+        } else {
+            // Self-closing or empty element
+            const selfClosingTags = ['img', 'input', 'br', 'hr', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr'];
+            if (selfClosingTags.includes(tag)) {
+                console.log(`${indent}<${tag}${attrs} />`);
+            } else {
+                console.log(`${indent}<${tag}${attrs}></${tag}>`);
+            }
         }
     }
     
-    console.log("DOM Structure:");
+    console.log("--- DOM Structure ---\n");
     displayTree(tree);
 
     if (showDeclared || showComputed) {
