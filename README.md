@@ -42,6 +42,59 @@ inspect-dom <selector> [options]
 
 ## Examples
 
+### Typical usage
+
+```bash
+inspect-dom .bottom-nav-bar -r --styles
+```
+
+```
+--- DOM Structure ---
+
+<div class="bottom-nav-bar">
+  <button class="nav-back-button">
+    <img src="/assets/nav-back.svg" alt="Back" />
+  </button>
+  <div class="nav-center-labels">
+    <div class="nav-product-name"></div>
+    <div class="nav-price"></div>
+  </div>
+  <button class="nav-add-to-cart-button"></button>
+</div>
+
+--- Style Information ---
+
+<div class="bottom-nav-bar">:
+  Styles:
+    Stylesheet Styles:
+      .bottom-nav-bar - styles.css:95:
+        position: fixed
+        bottom: 0px
+        left: 0px
+        right: 0px
+        height: 77px
+        background-color: rgba(255, 255, 255, 0.75)
+        display: flex
+        align-items: center
+        z-index: 1000
+    Inherited Styles:
+      From ancestor level 1:
+        html, body:
+          margin: 0
+          margin-top: 0px
+          margin-right: 0px
+          margin-bottom: 0px
+          margin-left: 0px
+
+  <button class="nav-back-button">:
+    Styles:
+      Inline Styles:
+        style="transform: scale(1); transform-origin: left center;"
+          transform: scale(1)
+          transform-origin: left center
+...
+```
+
 ### Basic DOM inspection
 ```bash
 inspect-dom #header
@@ -101,15 +154,14 @@ Show attribute selector (quotes needed for special characters)
 - **Style Analysis**: Displays CSS styles in Chrome DevTools format
 - **Specificity Sorting**: Orders CSS rules by specificity (highest first)
 - **Inheritance Display**: Shows inherited styles from parent elements
-- **Stylesheet Mapping**: Attempts to map styles to their source files with line numbers
-- **Cross-tab Detection**: Automatically finds the correct Chrome tab to inspect
+- **Stylesheet Mapping**: Maps styles to their source files with line numbers
 
 ## Output Format
 
 The tool provides structured output including:
 
 1. **DOM Structure**: Hierarchical display of elements
-2. **Style Information** (when requested):
+2. **Style Information**:
    - Inline styles (highest priority)
    - Stylesheet styles (sorted by specificity)
    - Inherited styles from parent elements
