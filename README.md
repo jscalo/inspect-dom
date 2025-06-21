@@ -36,7 +36,7 @@ inspect-dom <selector> [options]
 - `-r, --recursive` - Include child elements (default: only show matching element)
 - `--styles` - Show declared CSS styles for each element
 - `--computed-styles` - Show computed CSS styles for each element
-- `--no-defaults` - Hide browser default/user-agent styles and properties with default values (only with --styles)
+- `--show-implicit-styles` - Include browser-computed and implicit CSS properties (default: explicit styles only)
 - `--debug` - Show verbose debugging information (for troubleshooting only)
 - `-h, --help` - Show help message
 
@@ -72,11 +72,11 @@ inspect-dom .nav -r --styles --computed-styles
 ```
 Show element and children with both declared and computed styles
 
-### Exclude browser defaults
+### Include implicit styles
 ```bash
-inspect-dom .container --styles --no-defaults
+inspect-dom .container --styles --show-implicit-styles
 ```
-Show element styles excluding browser defaults
+Show element styles including browser-computed and implicit properties
 
 ### Debug mode
 ```bash
@@ -113,6 +113,7 @@ The tool provides structured output including:
    - Inline styles (highest priority)
    - Stylesheet styles (sorted by specificity)
    - Inherited styles from parent elements
+   - **Note**: By default, only explicit CSS declarations are shown. Use `--show-implicit-styles` to include browser-computed defaults.
 
 ## Requirements
 

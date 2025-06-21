@@ -45,12 +45,12 @@ ARGUMENTS:
     <selector>          CSS selector for the element to inspect (e.g., "#myId", ".myClass", "div.container")
 
 OPTIONS:
-    -r, --recursive     Include child elements (default: only show matching element)
-    --styles            Show declared CSS styles for each element
-    --computed-styles   Show computed CSS styles for each element
-    --no-defaults       Hide browser default/user-agent styles and properties with default values (only with --styles)
-    --debug             Show verbose debugging information (for troubleshooting only)
-    -h, --help          Show this help message
+    -r, --recursive         Include child elements (default: only show matching element)
+    --styles                Show declared CSS styles for each element
+    --computed-styles       Show computed CSS styles for each element
+    --show-implicit-styles  Include browser-computed and implicit CSS properties (default: explicit styles only)
+    --debug                 Show verbose debugging information (for troubleshooting only)
+    -h, --help              Show this help message
 
 DESCRIPTION:
     Connects to Chrome's remote debugging interface to inspect DOM elements and their styles.
@@ -78,8 +78,8 @@ EXAMPLES:
     inspect-dom .nav -r --styles --computed-styles
         Show element and children with both inline and computed styles
         
-    inspect-dom .container --styles --no-defaults
-        Show element styles excluding browser defaults
+    inspect-dom .container --styles --show-implicit-styles
+        Show element styles including browser-computed properties
         
     inspect-dom "div .container" --styles
         Show descendant selector
@@ -101,7 +101,7 @@ if (!selector) usage();
 const recursive = flags.includes('-r') || flags.includes('--recursive');
 const showDeclared = flags.includes('--styles');
 const showComputed = flags.includes('--computed-styles');
-const noDefaults = flags.includes('--no-defaults');
+const showImplicit = flags.includes('--show-implicit-styles');
 const debug = flags.includes('--debug');
 
 // Calculate CSS specificity for sorting
@@ -477,7 +477,7 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
         console.log(`${baseIndent}    Inline Styles:`);
         console.log(`${baseIndent}      style="${styleInfo.inlineStyle.cssText}"`);
         let uniqueProps = deduplicateProperties(styleInfo.inlineStyle.cssProperties);
-        if (noDefaults) {
+        if (!showImplicit) {
             uniqueProps = filterImplicitProperties(uniqueProps, debug);
         }
         for (const prop of uniqueProps) {
@@ -488,7 +488,7 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
     if (styleInfo.attributesStyle && styleInfo.attributesStyle.cssProperties.length > 0) {
         console.log(`${baseIndent}    Attribute Styles:`);
         let uniqueProps = deduplicateProperties(styleInfo.attributesStyle.cssProperties);
-        if (noDefaults) {
+        if (!showImplicit) {
             uniqueProps = filterImplicitProperties(uniqueProps, debug);
         }
         for (const prop of uniqueProps) {
@@ -500,9 +500,9 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
     if (styleInfo.matchedCSSRules && styleInfo.matchedCSSRules.length > 0) {
         console.log(`${baseIndent}    Stylesheet Styles:`);
         
-        // Filter out user-agent styles if --no-defaults is set
+        // Filter out user-agent styles unless --show-implicit-styles is set
         let rulesToShow = styleInfo.matchedCSSRules;
-        if (noDefaults) {
+        if (!showImplicit) {
             rulesToShow = styleInfo.matchedCSSRules.filter(ruleMatch => 
                 ruleMatch.rule.origin !== 'user-agent'
             );
@@ -524,7 +524,7 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                 const stylesheetName = await getStylesheetDisplayName(rule, CSS);
                 console.log(`${baseIndent}      ${rule.selectorList.text} - ${stylesheetName}:`);
                 let uniqueProps = deduplicateProperties(rule.style.cssProperties);
-                if (noDefaults) {
+                if (!showImplicit) {
                     uniqueProps = filterImplicitProperties(uniqueProps, debug);
                 }
                 for (const prop of uniqueProps) {
@@ -558,7 +558,7 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
             let uniqueRules = [];
             if (inheritedEntry.matchedCSSRules) {
                 let ancestorRules = inheritedEntry.matchedCSSRules;
-                if (noDefaults) {
+                if (!showImplicit) {
                     ancestorRules = ancestorRules.filter(ruleMatch => 
                         ruleMatch.rule.origin !== 'user-agent'
                     );
@@ -587,7 +587,7 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                 if (uniqueInlineProps.length > 0) {
                     console.log(`${baseIndent}        Inline styles:`);
                     let propsToShow = uniqueInlineProps;
-                    if (noDefaults) {
+                    if (!showImplicit) {
                         propsToShow = filterImplicitProperties(uniqueInlineProps, debug);
                     }
                     for (const prop of propsToShow) {
@@ -600,7 +600,7 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                     if (rule.selectorList && rule.style && rule.style.cssProperties.length > 0) {
                         console.log(`${baseIndent}        ${rule.selectorList.text}:`);
                         let uniqueProps = deduplicateProperties(rule.style.cssProperties);
-                        if (noDefaults) {
+                        if (!showImplicit) {
                             uniqueProps = filterImplicitProperties(uniqueProps, debug);
                         }
                         for (const prop of uniqueProps) {
