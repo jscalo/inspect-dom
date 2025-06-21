@@ -28,7 +28,8 @@ inspect-dom <selector> [options]
 
 ### Arguments
 
-- `<selector>` - CSS selector for the element to inspect (e.g., "#myId", ".myClass", "div.container")
+- `<selector>` - CSS selector for the element to inspect (e.g., #myId, .myClass, div.container)
+  - Use quotes for complex selectors with spaces or special characters
 
 ### Options
 
@@ -43,45 +44,56 @@ inspect-dom <selector> [options]
 
 ### Basic DOM inspection
 ```bash
-inspect-dom "#header"
+inspect-dom #header
 ```
 Show only the element with id "header"
 
 ### Recursive inspection
 ```bash
-inspect-dom ".sidebar" -r
+inspect-dom .sidebar -r
 ```
 Show element with class "sidebar" and all its children
 
 ### Style inspection
 ```bash
-inspect-dom "div.main-content" --styles
+inspect-dom div.main-content --styles
 ```
 Show element and its declared styles (no children)
 
 ### Computed styles
 ```bash
-inspect-dom ".container" -r --computed-styles
+inspect-dom .container -r --computed-styles
 ```
 Show element and all children with computed styles
 
 ### Combined style inspection
 ```bash
-inspect-dom ".nav" -r --styles --computed-styles
+inspect-dom .nav -r --styles --computed-styles
 ```
 Show element and children with both declared and computed styles
 
 ### Exclude browser defaults
 ```bash
-inspect-dom ".container" --styles --no-defaults
+inspect-dom .container --styles --no-defaults
 ```
 Show element styles excluding browser defaults
 
 ### Debug mode
 ```bash
-inspect-dom ".container" --styles --debug
+inspect-dom .container --styles --debug
 ```
 Show element with verbose debugging information (for troubleshooting connection issues)
+
+### Complex selectors (quotes required)
+```bash
+inspect-dom "div .container" --styles
+```
+Show descendant selector (quotes needed for spaces)
+
+```bash
+inspect-dom "input[type='text']" --styles
+```
+Show attribute selector (quotes needed for special characters)
 
 ## Features
 

@@ -63,23 +63,29 @@ DESCRIPTION:
     for the selected element(s).
 
 EXAMPLES:
-    inspect-dom "#header"
+    inspect-dom #header
         Show only the element with id "header"
         
-    inspect-dom ".sidebar" -r
+    inspect-dom .sidebar -r
         Show element with class "sidebar" and all its children
         
-    inspect-dom "div.main-content" --styles
+    inspect-dom div.main-content --styles
         Show element and its inline styles (no children)
         
-    inspect-dom ".container" -r --computed-styles
+    inspect-dom .container -r --computed-styles
         Show element and all children with computed styles
         
-    inspect-dom ".nav" -r --styles --computed-styles
+    inspect-dom .nav -r --styles --computed-styles
         Show element and children with both inline and computed styles
         
-    inspect-dom ".container" --styles --no-defaults
-        Show element styles excluding browser defaults`);
+    inspect-dom .container --styles --no-defaults
+        Show element styles excluding browser defaults
+        
+    inspect-dom "div .container" --styles
+        Show descendant selector
+        
+    inspect-dom "input[type='text']" --styles
+        Show attribute selector`);
     process.exit(0);
 }
 
