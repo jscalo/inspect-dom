@@ -104,6 +104,31 @@ const showComputed = flags.includes('--computed-styles');
 const showImplicit = flags.includes('--show-implicit-styles');
 const debug = flags.includes('--debug');
 
+// Validate flags - check for unsupported options
+const validFlags = ['-r', '--recursive', '--styles', '--computed-styles', '--show-implicit-styles', '--debug', '-h', '--help'];
+const invalidFlags = flags.filter(flag => !validFlags.includes(flag));
+if (invalidFlags.length > 0) {
+    console.error(`Error: Unsupported option(s): ${invalidFlags.join(', ')}\n`);
+    console.log(`inspect-dom - Inspect DOM elements and their styles from Chrome
+
+USAGE:
+    inspect-dom <selector> [options]
+
+ARGUMENTS:
+    <selector>          CSS selector for the element to inspect (e.g., "#myId", ".myClass", "div.container")
+
+OPTIONS:
+    -r, --recursive         Include child elements (default: only show matching element)
+    --styles                Show declared CSS styles for each element
+    --computed-styles       Show computed CSS styles for each element
+    --show-implicit-styles  Include browser-computed and implicit CSS properties (default: explicit styles only)
+    --debug                 Show verbose debugging information (for troubleshooting only)
+    -h, --help              Show this help message
+
+Use -h or --help for more information.`);
+    process.exit(1);
+}
+
 // Calculate CSS specificity for sorting
 function calculateSpecificity(selectorText) {
     // Simple specificity calculation: count IDs, classes, and elements
