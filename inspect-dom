@@ -703,7 +703,11 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
         }
         
         // Make sure DOM is fully loaded and get the document
-        const { root } = await DOM.getDocument({ depth: -1 });
+        // Always use pierce: true to traverse shadow DOM boundaries
+        const { root } = await DOM.getDocument({ 
+            depth: -1, 
+            pierce: true 
+        });
 
         // No need to navigate since we're already on the front tab
         
@@ -721,17 +725,36 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
     const { result } = await Runtime.evaluate({
         expression: `
       (function() {
-        const root = document.querySelector('${selector}');
-        if (!root) return null;
-        
         const recursive = ${recursive};
         
-        function walk(node, depth = 0) {
+        // Shadow DOM-aware element finding - always traverse shadow DOM
+        function findElementInShadowDOM(selector, context = document) {
+          // First try normal query
+          let element = context.querySelector(selector);
+          if (element) return element;
+          
+          // Always search within shadow roots
+          const elementsWithShadow = context.querySelectorAll('*');
+          for (const el of elementsWithShadow) {
+            if (el.shadowRoot) {
+              element = findElementInShadowDOM(selector, el.shadowRoot);
+              if (element) return element;
+            }
+          }
+          
+          return null;
+        }
+        
+        const root = findElementInShadowDOM('${selector}');
+        if (!root) return null;
+        
+        function walk(node, depth = 0, inShadowRoot = false) {
           const nodeInfo = {
             tag: node.tagName,
             id: node.id,
             class: node.className,
-            attributes: {}
+            attributes: {},
+            shadowContext: inShadowRoot
           };
           
           // Collect relevant attributes
@@ -745,8 +768,23 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
             }
           }
           
-          if (recursive && node.children.length > 0) {
-            nodeInfo.children = Array.from(node.children).map(child => walk(child, depth + 1));
+          if (recursive) {
+            nodeInfo.children = [];
+            
+            // Add regular children
+            if (node.children.length > 0) {
+              Array.from(node.children).forEach(child => {
+                nodeInfo.children.push(walk(child, depth + 1, inShadowRoot));
+              });
+            }
+            
+            // Add shadow DOM children - always traverse when they exist
+            if (node.shadowRoot) {
+              nodeInfo.hasShadowRoot = true;
+              Array.from(node.shadowRoot.children).forEach(child => {
+                nodeInfo.children.push(walk(child, depth + 1, true));
+              });
+            }
           }
           
           return nodeInfo;
@@ -791,18 +829,27 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
             }
         }
         
+        // Add shadow DOM context indicator
+        let shadowIndicator = "";
+        if (node.shadowContext) {
+            shadowIndicator = " [shadow]";
+        }
+        if (node.hasShadowRoot) {
+            shadowIndicator += " [has-shadow-root]";
+        }
+        
         // Display in HTML-like format
         if (node.children && node.children.length > 0) {
-            console.log(`${indent}<${tag}${attrs}>`);
+            console.log(`${indent}<${tag}${attrs}>${shadowIndicator}`);
             node.children.forEach(child => displayTree(child, depth + 1));
             console.log(`${indent}</${tag}>`);
         } else {
             // Self-closing or empty element
             const selfClosingTags = ['img', 'input', 'br', 'hr', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr'];
             if (selfClosingTags.includes(tag)) {
-                console.log(`${indent}<${tag}${attrs} />`);
+                console.log(`${indent}<${tag}${attrs} />${shadowIndicator}`);
             } else {
-                console.log(`${indent}<${tag}${attrs}></${tag}>`);
+                console.log(`${indent}<${tag}${attrs}></${tag}>${shadowIndicator}`);
             }
         }
     }
@@ -817,10 +864,29 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
         const { result: elementsResult } = await Runtime.evaluate({
             expression: `
                 (function() {
-                    const root = document.querySelector('${selector}');
+                    const recursive = ${recursive};
+                    
+                    // Shadow DOM-aware element finding - always traverse shadow DOM
+                    function findElementInShadowDOM(selector, context = document) {
+                        // First try normal query
+                        let element = context.querySelector(selector);
+                        if (element) return element;
+                        
+                        // Always search within shadow roots
+                        const elementsWithShadow = context.querySelectorAll('*');
+                        for (const el of elementsWithShadow) {
+                            if (el.shadowRoot) {
+                                element = findElementInShadowDOM(selector, el.shadowRoot);
+                                if (element) return element;
+                            }
+                        }
+                        
+                        return null;
+                    }
+                    
+                    const root = findElementInShadowDOM('${selector}');
                     if (!root) return null;
                     
-                    const recursive = ${recursive};
                     const results = [];
                     
                     function processElement(node, depth = 0, path = []) {
@@ -894,21 +960,24 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                         // Use ID selector for elements with IDs
                         const result = await DOM.querySelector({
                             nodeId: root.nodeId,
-                            selector: `#${elementInfo.id}`
+                            selector: `#${elementInfo.id}`,
+                            pierce: true
                         });
                         nodeId = result.nodeId;
                     } else if (elementInfo.selector) {
                         // Use the generated selector
                         const result = await DOM.querySelector({
                             nodeId: root.nodeId,
-                            selector: elementInfo.selector
+                            selector: elementInfo.selector,
+                            pierce: true
                         });
                         nodeId = result.nodeId;
                     } else {
                         // Fallback to original selector for root element
                         const result = await DOM.querySelector({
                             nodeId: root.nodeId,
-                            selector: selector
+                            selector: selector,
+                            pierce: true
                         });
                         nodeId = result.nodeId;
                     }
@@ -1014,7 +1083,12 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                     if (debug) {
                         console.log(`    CSS Error details: ${error.message}`);
                     }
-                    console.log("  Error getting declared styles");
+                    // Check if this might be a shadow DOM element
+                    if (error.message.includes("Could not find node") || nodeId === 0) {
+                        console.log("  Note: CSS styles not available (element may be in shadow DOM)");
+                    } else {
+                        console.log("  Error getting declared styles");
+                    }
                 }
             }
 
@@ -1054,7 +1128,12 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                     if (debug) {
                         console.log(`    Computed styles error: ${error.message}`);
                     }
-                    console.log(`${indent}  Error getting computed styles`);
+                    // Check if this might be a shadow DOM element
+                    if (error.message.includes("Could not find node") || nodeId === 0) {
+                        console.log(`${indent}  Note: Computed styles not available (element may be in shadow DOM)`);
+                    } else {
+                        console.log(`${indent}  Error getting computed styles`);
+                    }
                 }
             }
             } catch (error) {
