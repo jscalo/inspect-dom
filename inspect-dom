@@ -1083,9 +1083,211 @@ async function displayStyledOutput(styleInfo, CSS, debug, baseIndent = "") {
                     if (debug) {
                         console.log(`    CSS Error details: ${error.message}`);
                     }
-                    // Check if this might be a shadow DOM element
+                    // Check if this might be a shadow DOM element - try JavaScript fallback
                     if (error.message.includes("Could not find node") || nodeId === 0) {
-                        console.log("  Note: CSS styles not available (element may be in shadow DOM)");
+                        if (debug) {
+                            console.log("    Attempting JavaScript-based CSS extraction for shadow DOM element");
+                        }
+                        
+                        let cssResult = null;
+                        try {
+                            // Use JavaScript to directly extract CSS information from shadow DOM element
+                            const evaluationResult = await Runtime.evaluate({
+                                expression: `
+                                    (function() {
+                                        const showComputed = ${showComputed};
+                                        
+                                        // Shadow DOM-aware element finding
+                                        function findElementInShadowDOM(selector, context = document) {
+                                            let element = context.querySelector(selector);
+                                            if (element) return element;
+                                            
+                                            const elementsWithShadow = context.querySelectorAll('*');
+                                            for (const el of elementsWithShadow) {
+                                                if (el.shadowRoot) {
+                                                    element = findElementInShadowDOM(selector, el.shadowRoot);
+                                                    if (element) return element;
+                                                }
+                                            }
+                                            return null;
+                                        }
+                                        
+                                        const targetSelector = '${selector}';
+                                        const element = findElementInShadowDOM(targetSelector);
+                                        if (!element) return null;
+                                        
+                                        const styles = {
+                                            inline: {},
+                                            stylesheet: {},
+                                            computed: {},
+                                            hasStyles: false
+                                        };
+                                        
+                                        // Get inline styles
+                                        if (element.style && element.style.cssText) {
+                                            styles.inline.cssText = element.style.cssText;
+                                            styles.hasStyles = true;
+                                            
+                                            // Parse individual inline properties
+                                            const inlineProps = {};
+                                            for (let i = 0; i < element.style.length; i++) {
+                                                const prop = element.style[i];
+                                                const value = element.style.getPropertyValue(prop);
+                                                const priority = element.style.getPropertyPriority(prop);
+                                                inlineProps[prop] = priority ? value + ' !' + priority : value;
+                                            }
+                                            styles.inline.properties = inlineProps;
+                                        }
+                                        
+                                        // Try to get stylesheet styles by inspecting applied rules
+                                        try {
+                                            const computedStyle = window.getComputedStyle(element);
+                                            const stylesheetRules = {};
+                                            
+                                            // Get all stylesheets in the document
+                                            const allStylesheets = Array.from(document.styleSheets);
+                                            
+                                            // Also check shadow DOM stylesheets if element is in shadow DOM
+                                            let currentNode = element;
+                                            while (currentNode) {
+                                                if (currentNode.shadowRoot) {
+                                                    const shadowSheets = Array.from(currentNode.shadowRoot.styleSheets || []);
+                                                    allStylesheets.push(...shadowSheets);
+                                                }
+                                                currentNode = currentNode.parentNode || currentNode.host;
+                                            }
+                                            
+                                            // Check each stylesheet for rules that match this element
+                                            for (const sheet of allStylesheets) {
+                                                try {
+                                                    const rules = Array.from(sheet.cssRules || []);
+                                                    for (const rule of rules) {
+                                                        if (rule.type === CSSRule.STYLE_RULE) {
+                                                            try {
+                                                                if (element.matches(rule.selectorText)) {
+                                                                    const sheetHref = sheet.href || 'inline styles';
+                                                                    const sheetName = sheetHref.includes('/') ? 
+                                                                        sheetHref.split('/').pop() : sheetHref;
+                                                                    
+                                                                    if (!stylesheetRules[sheetName]) {
+                                                                        stylesheetRules[sheetName] = {};
+                                                                    }
+                                                                    
+                                                                    const ruleProps = {};
+                                                                    for (let i = 0; i < rule.style.length; i++) {
+                                                                        const prop = rule.style[i];
+                                                                        const value = rule.style.getPropertyValue(prop);
+                                                                        const priority = rule.style.getPropertyPriority(prop);
+                                                                        ruleProps[prop] = priority ? value + ' !' + priority : value;
+                                                                    }
+                                                                    
+                                                                    stylesheetRules[sheetName][rule.selectorText] = ruleProps;
+                                                                    styles.hasStyles = true;
+                                                                }
+                                                            } catch (matchError) {
+                                                                // Skip rules that can't be matched
+                                                            }
+                                                        }
+                                                    }
+                                                } catch (sheetError) {
+                                                    // Skip stylesheets that can't be accessed (CORS, etc.)
+                                                }
+                                            }
+                                            
+                                            styles.stylesheet = stylesheetRules;
+                                        } catch (stylesheetError) {
+                                            // If stylesheet extraction fails, continue with computed styles only
+                                        }
+                                        
+                                        // Get computed styles only if requested
+                                        if (showComputed) {
+                                            const computedStyle = window.getComputedStyle(element);
+                                            const importantProps = [
+                                                // Layout properties
+                                                'display', 'position', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
+                                                'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left',
+                                                'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+                                                'border', 'border-top', 'border-right', 'border-bottom', 'border-left',
+                                                'border-width', 'border-style', 'border-color', 'border-radius',
+                                                // Positioning
+                                                'top', 'left', 'right', 'bottom', 'z-index',
+                                                // Flexbox & Grid
+                                                'flex', 'flex-direction', 'flex-wrap', 'justify-content', 'align-items', 'align-content',
+                                                'grid', 'grid-template-columns', 'grid-template-rows', 'grid-gap',
+                                                // Background & Colors
+                                                'background', 'background-color', 'background-image', 'background-position', 'background-size',
+                                                'color', 'opacity', 'visibility',
+                                                // Typography
+                                                'font-size', 'font-family', 'font-weight', 'font-style', 'line-height', 'text-align',
+                                                'text-decoration', 'text-transform', 'letter-spacing', 'word-spacing',
+                                                // Other common properties
+                                                'overflow', 'overflow-x', 'overflow-y', 'float', 'clear', 'cursor',
+                                                'box-shadow', 'text-shadow', 'transform', 'transition', 'animation'
+                                            ];
+                                            
+                                            for (const prop of importantProps) {
+                                                const value = computedStyle.getPropertyValue(prop);
+                                                // Be much less restrictive - only filter out truly empty values
+                                                if (value && value.trim() !== '') {
+                                                    styles.computed[prop] = value;
+                                                    styles.hasStyles = true;
+                                                }
+                                            }
+                                        }
+                                        
+                                        return styles;
+                                    })()
+                                `,
+                                returnByValue: true
+                            });
+                            
+                            cssResult = evaluationResult.result;
+                            
+                            if (cssResult.value && cssResult.value.hasStyles) {
+                                const styles = cssResult.value;
+                                console.log("  Styles (extracted from shadow DOM):");
+                                
+                                // Show inline styles
+                                if (styles.inline.cssText) {
+                                    console.log("    Inline Styles:");
+                                    console.log(`      style="${styles.inline.cssText}"`);
+                                    if (styles.inline.properties) {
+                                        for (const [prop, value] of Object.entries(styles.inline.properties)) {
+                                            console.log(`        ${prop}: ${value}`);
+                                        }
+                                    }
+                                }
+                                
+                                // Show stylesheet styles
+                                if (styles.stylesheet && Object.keys(styles.stylesheet).length > 0) {
+                                    console.log("    Stylesheet Styles:");
+                                    for (const [sheetName, rules] of Object.entries(styles.stylesheet)) {
+                                        for (const [selector, properties] of Object.entries(rules)) {
+                                            console.log(`      ${selector} - ${sheetName}:`);
+                                            for (const [prop, value] of Object.entries(properties)) {
+                                                console.log(`        ${prop}: ${value}`);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Show computed styles
+                                if (Object.keys(styles.computed).length > 0) {
+                                    console.log("    Key Computed Styles:");
+                                    for (const [prop, value] of Object.entries(styles.computed)) {
+                                        console.log(`      ${prop}: ${value}`);
+                                    }
+                                }
+                            } else {
+                                console.log("  Note: No significant CSS styles found for this shadow DOM element");
+                            }
+                            
+                        } catch (jsError) {
+                            if (debug) {
+                                console.log(`    JavaScript CSS extraction failed: ${jsError.message}`);
+                            }
+                            console.log("  Note: CSS styles not available (element may be in shadow DOM)");
+                        }
                     } else {
                         console.log("  Error getting declared styles");
                     }
